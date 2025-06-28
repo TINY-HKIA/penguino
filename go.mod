@@ -6,3 +6,5 @@ require (
 	github.com/coder/websocket v1.8.13
 	github.com/joho/godotenv v1.5.1
 )
+
+require github.com/lmittmann/tint v1.1.2 // indirect

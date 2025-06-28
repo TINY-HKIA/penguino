@@ -4,28 +4,34 @@ import (
 	"log"
 	"log/slog"
 	"os"
+	"time"
 
 	_ "github.com/joho/godotenv/autoload"
+	"github.com/lmittmann/tint"
 	"github.com/tinyhkia/bot/discord"
 )
 
 func main() {
 	setupLogger()
 
-	token := os.Getenv("BOT_TOKEN")
-	bot := discord.NewBot(token)
+	bot := discord.NewBot()
 
 	log.Fatal(bot.Start())
 }
 
 func setupLogger() {
+	w := os.Stderr
+
 	level := slog.LevelInfo
 	if os.Getenv("LOG_LEVEL") == "debug" {
 		level = slog.LevelDebug
 	}
 
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		Level: level,
-	}))
-	slog.SetDefault(logger)
+	// Set global logger with custom options
+	slog.SetDefault(slog.New(
+		tint.NewHandler(w, &tint.Options{
+			Level:      level,
+			TimeFormat: time.Kitchen,
+		}),
+	))
 }
