@@ -1,7 +1,6 @@
 package main
 
 import (
-	"log"
 	"log/slog"
 	"os"
 	"time"
@@ -13,10 +12,9 @@ import (
 
 func main() {
 	setupLogger()
-
 	bot := discord.NewBot()
-
-	log.Fatal(bot.Start())
+	slog.Error(bot.Start().Error())
+	os.Exit(1)
 }
 
 func setupLogger() {

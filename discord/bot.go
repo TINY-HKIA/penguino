@@ -3,13 +3,13 @@ package discord
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"math/rand/v2"
 	"net/http"
 	"os"
+	"runtime"
 	"time"
 
 	"github.com/coder/websocket"
@@ -23,8 +23,9 @@ var (
 )
 
 type Bot struct {
-	conn *websocket.Conn
 	cfg  Config
+	conn *websocket.Conn
+	seq  int
 }
 type Config struct {
 	Token string
@@ -52,7 +53,6 @@ func (bot *Bot) Start() error {
 	if err != nil {
 		return err
 	}
-
 	if resp.StatusCode != 200 {
 		return fmt.Errorf("invalid bot token")
 	}
@@ -67,10 +67,9 @@ func (bot *Bot) Start() error {
 	if err := json.Unmarshal(b, &botGateway); err != nil {
 		return err
 	}
+	slog.Debug("bot_gateway", "url", botGateway.URL)
 
-	slog.Debug("botGatewayResponse", "url", botGateway.URL)
-
-	c, _, err := websocket.Dial(ctx, botGateway.URL, nil)
+	c, _, err := websocket.Dial(ctx, botGateway.URL+"/?v=10&encoding=json", nil)
 	if err != nil {
 		return err
 	}
@@ -78,50 +77,73 @@ func (bot *Bot) Start() error {
 	bot.conn = c
 
 	for {
-		var payload eventPayload
+		var payload receiveEvent
 		if err := wsjson.Read(ctx, c, &payload); err != nil {
-			var closeErr websocket.CloseError
-			if errors.As(err, &closeErr) {
-				slog.Info("server closed connection",
-					"code", closeErr.Code,
-					"reason", closeErr.Reason)
-			}
+			// var closeErr websocket.CloseError
 			return err
 		}
 
-		slog.Debug("received",
-			"type", payload.Type,
-			"sequence", payload.SequenceNum,
-			"op", payload.Op)
+		slog.Debug("receive", "op", payload.Op)
+
 		switch payload.Op {
+		case OpcodeDispatch:
+			slog.Debug("incoming dispatch",
+				"t", *payload.Type,
+				"s", *payload.SequenceNum,
+				"d", string(payload.Data))
+
+			bot.seq = *payload.SequenceNum
+
+			switch *payload.Type {
+			case EventReady:
+				// slog.Info(penguino)
+			case EventInteractionCreate:
+
+			}
 		case OpcodeHeartbeat:
-			sendEvent(bot, gatewayEvent[any]{Op: OpcodeHeartbeat}, ctx)
+			write(ctx, bot, sendEvent[any]{Op: OpcodeHeartbeat})
 		case OpcodeHello:
-			var helloEvent helloReceiveEvent
+			var helloEvent helloReceivePayload
 			json.Unmarshal(payload.Data, &helloEvent)
-			slog.Debug("helloEvent", "heartbeatInterval", helloEvent.HeartbeatInterval)
-
-			sleepTime := float32(helloEvent.HeartbeatInterval) * rand.Float32()
-			time.Sleep(time.Duration(sleepTime) * time.Millisecond)
-
+			slog.Debug("heartbeat", "interval", helloEvent.HeartbeatInterval)
 			go bot.heartbeatLoop(ctx, helloEvent.HeartbeatInterval)
+			write(ctx, bot, sendEvent[any]{
+				Op: OpcodeIdentify,
+				Data: map[string]any{
+					"token":   bot.cfg.Token,
+					"intents": 513,
+					"properties": map[string]any{
+						"os": runtime.GOOS,
+					},
+					"presence": map[string]any{
+						"activities": []map[string]any{
+							{
+								"name": "HKIA!!!!!",
+								"type": 0,
+							},
+						},
+						"status": status,
+					},
+				}})
 		case OpcodeHeartbeatAck:
 		default:
-			slog.Warn("unrecognizedOpcode", "op", payload.Op, "data", string(payload.Data))
+			slog.Warn("unknown opcode", "op", payload.Op, "data", string(payload.Data))
 		}
 	}
 }
 
 func (bot *Bot) heartbeatLoop(ctx context.Context, interval int) {
+	// wait for (heartbeat_interval * jitter) milliseconds before starting cycle
+	sleepTime := float32(interval) * rand.Float32()
+	time.Sleep(time.Duration(sleepTime) * time.Millisecond)
 
 	for {
-		sendEvent(bot, gatewayEvent[any]{Op: 1}, ctx)
+		write(ctx, bot, sendEvent[any]{Op: 1})
 		time.Sleep(time.Duration(interval) * time.Millisecond)
 	}
 }
 
-func sendEvent[T any](b *Bot, event gatewayEvent[T], ctx context.Context) {
+func write[T any](ctx context.Context, b *Bot, event sendEvent[T]) {
 	wsjson.Write(ctx, b.conn, event)
-	slog.Debug("sent", "op", event.Op)
+	slog.Debug("send", "op", event.Op, "s", b.seq)
 }
-
