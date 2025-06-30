@@ -2,7 +2,6 @@ package discord
 
 import "encoding/json"
 
-// Gateway opcodes
 const (
 	OpcodeDispatch     = 0
 	OpcodeHeartbeat    = 1
@@ -12,9 +11,8 @@ const (
 	OpcodeHeartbeatAck = 11
 )
 
-// Event names
 const (
-	EventReady = "READY"
+	EventReady             = "READY"
 	EventInteractionCreate = "INTERACTION_CREATE"
 )
 

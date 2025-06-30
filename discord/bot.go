@@ -16,31 +16,41 @@ import (
 	"github.com/coder/websocket/wsjson"
 )
 
-var (
-	DefaultConfig = Config{
-		Token: os.Getenv("BOT_TOKEN"),
-	}
-)
-
 type Bot struct {
-	cfg  Config
-	conn *websocket.Conn
-	seq  int
-}
-type Config struct {
-	Token string
+	cfg      Config
+	conn     *websocket.Conn //
+	seq      int
+	handlers map[string]HandlerFunc
 }
 
 func NewBot() *Bot {
 	return &Bot{
-		cfg: DefaultConfig,
+		cfg:      DefaultConfig,
+		handlers: DefaultHandlers,
 	}
 }
 
 func NewBotWithConfig(cfg Config) *Bot {
 	return &Bot{
-		cfg: cfg,
+		cfg:      cfg,
+		handlers: DefaultHandlers,
 	}
+}
+
+type Config struct {
+	Token string
+}
+
+var DefaultConfig = Config{
+	Token: os.Getenv("BOT_TOKEN"),
+}
+
+var DefaultHandlers = make(map[string]HandlerFunc)
+
+type HandlerFunc func(ctx Context) error
+
+func (bot *Bot) Handle(command string, f HandlerFunc) {
+	bot.handlers[command] = f
 }
 
 func (bot *Bot) Start() error {
@@ -76,9 +86,13 @@ func (bot *Bot) Start() error {
 	defer c.CloseNow()
 	bot.conn = c
 
+	return bot.receiveLoop(ctx)
+}
+
+func (bot *Bot) receiveLoop(ctx context.Context) error {
 	for {
 		var payload receiveEvent
-		if err := wsjson.Read(ctx, c, &payload); err != nil {
+		if err := wsjson.Read(ctx, bot.conn, &payload); err != nil {
 			// var closeErr websocket.CloseError
 			return err
 		}
@@ -87,7 +101,7 @@ func (bot *Bot) Start() error {
 
 		switch payload.Op {
 		case OpcodeDispatch:
-			slog.Debug("incoming dispatch",
+			slog.Debug("dispatch",
 				"t", *payload.Type,
 				"s", *payload.SequenceNum,
 				"d", string(payload.Data))
@@ -96,9 +110,17 @@ func (bot *Bot) Start() error {
 
 			switch *payload.Type {
 			case EventReady:
-				// slog.Info(penguino)
+				slog.Info(penguinoStart)
 			case EventInteractionCreate:
+				var d interactionCreate
+				if err := json.Unmarshal(payload.Data, &d); err != nil {
+					return err
+				}
 
+				err := bot.handlers[d.Data.Name](InteractionContext{req: d})
+				if err != nil {
+					slog.Error(err.Error())
+				}
 			}
 		case OpcodeHeartbeat:
 			write(ctx, bot, sendEvent[any]{Op: OpcodeHeartbeat})

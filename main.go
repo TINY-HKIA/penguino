@@ -3,33 +3,27 @@ package main
 import (
 	"log/slog"
 	"os"
-	"time"
 
 	_ "github.com/joho/godotenv/autoload"
-	"github.com/lmittmann/tint"
 	"github.com/tinyhkia/bot/discord"
 )
 
 func main() {
 	setupLogger()
 	bot := discord.NewBot()
+
+	bot.Handle("ping", HandlePING)
+	
 	slog.Error(bot.Start().Error())
 	os.Exit(1)
 }
 
-func setupLogger() {
-	w := os.Stderr
-
-	level := slog.LevelInfo
-	if os.Getenv("LOG_LEVEL") == "debug" {
-		level = slog.LevelDebug
+func HandlePING(ctx discord.Context) error {
+	response := discord.InteractionResponse{
+		Type: discord.Message,
+		Data: &discord.Data{
+			Content: "ayeeeee",
+		},
 	}
-
-	// Set global logger with custom options
-	slog.SetDefault(slog.New(
-		tint.NewHandler(w, &tint.Options{
-			Level:      level,
-			TimeFormat: time.Kitchen,
-		}),
-	))
+	return ctx.Respond(response)
 }

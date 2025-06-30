@@ -16,7 +16,7 @@ package discord
 
 const status = "invisible"
 
-const art = "\x1b[38;5;183m" + `
+const penguinoStart = "\x1b[38;5;183m" + `
 
 .##.....##.##....##.####....###...
 .##.....##.##...##...##....##.##..
