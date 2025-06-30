@@ -2,7 +2,6 @@ package main
 
 import (
 	"log/slog"
-	"os"
 
 	_ "github.com/joho/godotenv/autoload"
 	"github.com/tinyhkia/bot/discord"
@@ -10,20 +9,16 @@ import (
 
 func main() {
 	setupLogger()
-	bot := discord.NewBot()
-
-	bot.Handle("ping", HandlePING)
-	
-	slog.Error(bot.Start().Error())
-	os.Exit(1)
+	b := discord.NewBot()
+	b.HandleCommand("ping", PingHandler)
+	b.HandleCommand("characters", CharactersHandler)
+	slog.Error(b.Start().Error())
 }
 
-func HandlePING(ctx discord.Context) error {
-	response := discord.InteractionResponse{
-		Type: discord.Message,
-		Data: &discord.Data{
-			Content: "ayeeeee",
-		},
-	}
-	return ctx.Respond(response)
+func PingHandler(ctx discord.Context) error {
+	return ctx.SendContent("PONG")
+}
+
+func CharactersHandler(ctx discord.Context) error {
+	return ctx.SendContent("kuromi, keropi, hello kitty")
 }

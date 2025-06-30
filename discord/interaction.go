@@ -4,27 +4,10 @@ package discord
 type InteractionType int
 
 var (
-	Message InteractionType = 4
+	Msg InteractionType = 4
 )
 
-type interactionCreate struct {
-	ID    string `json:"id"`
-	Type  int    `json:"type"`
-	Token string `json:"token"`
-	Data  struct {
-		Type int    `json:"type"`
-		Name string `json:"name"`
-	} `json:"data"`
-}
-
-// https://discord.com/developers/docs/interactions/receiving-and-responding#interaction-response-object
-type InteractionResponse struct {
-	Type InteractionType          `json:"type"`
-	Data *Data `json:"data,omitempty"`
-}
-
-// https://discord.com/developers/docs/interactions/receiving-and-responding#interaction-response-object-messages
-type Data struct {
+type Message struct {
 	// Message content
 	Content string `json:"content"` //
 	// 	Supports up to 10 embeds
@@ -41,4 +24,20 @@ type Embed struct {
 	Url string `json:"url,omitempty"`
 	// color code of the embed
 	Color int `json:"color,omitempty"`
+}
+
+type interactionCreate struct {
+	ID    string `json:"id"`
+	Type  int    `json:"type"`
+	Token string `json:"token"`
+	Data  struct {
+		Type int    `json:"type"`
+		Name string `json:"name"`
+	} `json:"data"`
+}
+
+// https://discord.com/developers/docs/interactions/receiving-and-responding#interaction-response-object
+type InteractionResponse struct {
+	Type InteractionType      `json:"type"`
+	Data *Message `json:"data,omitempty"`
 }

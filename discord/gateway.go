@@ -1,19 +1,21 @@
 package discord
 
-import "encoding/json"
+import (
+	"encoding/json"
+)
 
 const (
 	OpcodeDispatch     = 0
 	OpcodeHeartbeat    = 1
 	OpcodeIdentify     = 2
+	OpcodeResume       = 6
 	OpcodeReconnect    = 7
 	OpcodeHello        = 10
 	OpcodeHeartbeatAck = 11
-)
 
-const (
 	EventReady             = "READY"
 	EventInteractionCreate = "INTERACTION_CREATE"
+	EventResumed           = "RESUMED"
 )
 
 // Incoming gateway event
@@ -34,22 +36,8 @@ type helloReceivePayload struct {
 	HeartbeatInterval int `json:"heartbeat_interval"`
 }
 
-var defaultIdentifyPayload = map[string]any{
-	"op": 2,
-	"d": map[string]any{
-		"token":   "your_token_here",
-		"intents": 8,
-		"properties": map[string]any{
-			"os": "linux",
-		},
-		"presence": map[string]any{
-			"activities": []map[string]any{
-				{
-					"name": "HKIA!!!!!",
-					"type": 0,
-				},
-			},
-			"status": "dnd",
-		},
-	},
+type resumeSendPayload struct {
+	SessionID string `json:"session_id"`
+	Token     string `json:"token"`
+	Seq       int    `json:"seq"`
 }

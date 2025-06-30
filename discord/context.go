@@ -3,25 +3,25 @@ package discord
 import (
 	"bytes"
 	"encoding/json"
-	"io"
 	"log/slog"
 	"net/http"
 )
 
 type Context interface {
-	Respond(resp InteractionResponse) error
-	Bind(i any) error
+	Send(msg *Message) error
+	SendContent(msg string) error
+	// Bind(i any) error
 }
 
 type InteractionContext struct {
 	req interactionCreate
 }
 
-func (ctx InteractionContext) Bind(i any) error {
-	return nil
-}
-
-func (ctx InteractionContext) Respond(resp InteractionResponse) error {
+func (ctx InteractionContext) Send(msg *Message) error {
+	resp := InteractionResponse{
+		Type: Msg,
+		Data: msg,
+	}
 
 	buf := new(bytes.Buffer)
 	if err := json.NewEncoder(buf).Encode(resp); err != nil {
@@ -31,13 +31,24 @@ func (ctx InteractionContext) Respond(resp InteractionResponse) error {
 	if err != nil {
 		slog.Error(err.Error())
 	}
-	defer r.Body.Close()
 
-	b, err := io.ReadAll(r.Body)
-	r.Body.Close()
-	if err != nil {
-		return err
+	slog.Debug("interaction_callback_response", "status", r.Status)
+	return nil
+}
+func (ctx InteractionContext) SendContent(msg string) error {
+	resp := InteractionResponse{
+		Type: Msg,
+		Data: &Message{Content: msg},
 	}
-	slog.Debug("interaction callback response", "status", r.Status, "body", string(b))
+
+	buf := new(bytes.Buffer)
+	if err := json.NewEncoder(buf).Encode(resp); err != nil {
+		slog.Error("encode error:" + err.Error())
+	}
+	r, err := http.Post(httpApiBaseUrl+"/interactions/"+ctx.req.ID+"/"+ctx.req.Token+"/callback", "application/json", buf)
+	if err != nil {
+		slog.Error(err.Error())
+	}
+	slog.Debug("interaction_callback_response", "status", r.Status)
 	return nil
 }

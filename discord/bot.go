@@ -17,22 +17,26 @@ import (
 )
 
 type Bot struct {
-	cfg      Config
-	conn     *websocket.Conn //
-	seq      int
-	handlers map[string]HandlerFunc
+	Cfg Config
+
+	conn       *websocket.Conn //
+	handlers   map[string]HandlerFunc
+	gatewayUrl string
+	seq        int
+	isResumed  bool
+	sessionId  string
 }
 
 func NewBot() *Bot {
 	return &Bot{
-		cfg:      DefaultConfig,
+		Cfg:      DefaultConfig,
 		handlers: DefaultHandlers,
 	}
 }
 
 func NewBotWithConfig(cfg Config) *Bot {
 	return &Bot{
-		cfg:      cfg,
+		Cfg:      cfg,
 		handlers: DefaultHandlers,
 	}
 }
@@ -49,15 +53,14 @@ var DefaultHandlers = make(map[string]HandlerFunc)
 
 type HandlerFunc func(ctx Context) error
 
-func (bot *Bot) Handle(command string, f HandlerFunc) {
-	bot.handlers[command] = f
+func (bot *Bot) HandleCommand(name string, f HandlerFunc) {
+	bot.handlers[name] = f
 }
 
 func (bot *Bot) Start() error {
 	ctx := context.Background()
-
 	req, _ := http.NewRequest(http.MethodGet, fmt.Sprintf("%s%s", httpApiBaseUrl, getBotGateway), nil)
-	req.Header.Set("Authorization", "Bot "+bot.cfg.Token)
+	req.Header.Set("Authorization", "Bot "+bot.Cfg.Token)
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -72,20 +75,23 @@ func (bot *Bot) Start() error {
 	if err != nil {
 		return err
 	}
-
 	var botGateway botGatewayResp
 	if err := json.Unmarshal(b, &botGateway); err != nil {
 		return err
 	}
 	slog.Debug("bot_gateway", "url", botGateway.URL)
+	bot.gatewayUrl = botGateway.URL
 
-	c, _, err := websocket.Dial(ctx, botGateway.URL+"/?v=10&encoding=json", nil)
+	c, _, err := websocket.Dial(ctx, bot.gatewayUrl+"/?v=10&encoding=json", nil)
 	if err != nil {
 		return err
 	}
-	defer c.CloseNow()
+	defer func() {
+		if c != nil {
+			c.CloseNow()
+		}
+	}()
 	bot.conn = c
-
 	return bot.receiveLoop(ctx)
 }
 
@@ -101,17 +107,27 @@ func (bot *Bot) receiveLoop(ctx context.Context) error {
 
 		switch payload.Op {
 		case OpcodeDispatch:
+			bot.seq = *payload.SequenceNum
 			slog.Debug("dispatch",
 				"t", *payload.Type,
-				"s", *payload.SequenceNum,
-				"d", string(payload.Data))
-
-			bot.seq = *payload.SequenceNum
-
+				"s", *payload.SequenceNum)
 			switch *payload.Type {
 			case EventReady:
+				var ready struct {
+					ResumeUrl string `json:"resume_gateway_url"`
+					SessionId string `json:"session_id"`
+				}
+				json.Unmarshal(payload.Data, &ready)
+				bot.gatewayUrl = ready.ResumeUrl
+				bot.sessionId = ready.SessionId
 				slog.Info(penguinoStart)
+
 			case EventInteractionCreate:
+				// slog.Debug("dispatch",
+				// 	"t", *payload.Type,
+				// 	"s", *payload.SequenceNum,
+				// 	"d", string(payload.Data))
+
 				var d interactionCreate
 				if err := json.Unmarshal(payload.Data, &d); err != nil {
 					return err
@@ -128,26 +144,27 @@ func (bot *Bot) receiveLoop(ctx context.Context) error {
 			var helloEvent helloReceivePayload
 			json.Unmarshal(payload.Data, &helloEvent)
 			slog.Debug("heartbeat", "interval", helloEvent.HeartbeatInterval)
-			go bot.heartbeatLoop(ctx, helloEvent.HeartbeatInterval)
-			write(ctx, bot, sendEvent[any]{
-				Op: OpcodeIdentify,
-				Data: map[string]any{
-					"token":   bot.cfg.Token,
-					"intents": 513,
-					"properties": map[string]any{
-						"os": runtime.GOOS,
-					},
-					"presence": map[string]any{
-						"activities": []map[string]any{
-							{
-								"name": "HKIA!!!!!",
-								"type": 0,
-							},
-						},
-						"status": status,
-					},
-				}})
+			if !bot.isResumed {
+				go bot.heartbeatLoop(ctx, helloEvent.HeartbeatInterval)
+				if err := bot.identify(ctx); err != nil {
+					return err
+				}
+			}
+
 		case OpcodeHeartbeatAck:
+		case OpcodeReconnect:
+			bot.conn.CloseNow()
+			c, _, err := websocket.Dial(ctx, bot.gatewayUrl+"/?v=10&encoding=json", nil)
+			if err != nil {
+				return err
+			}
+			bot.isResumed = true
+			bot.conn = c
+			write(ctx, bot, sendEvent[resumeSendPayload]{Op: OpcodeResume, Data: resumeSendPayload{
+				SessionID: bot.sessionId,
+				Token:     bot.Cfg.Token,
+				Seq:       bot.seq,
+			}})
 		default:
 			slog.Warn("unknown opcode", "op", payload.Op, "data", string(payload.Data))
 		}
@@ -165,7 +182,30 @@ func (bot *Bot) heartbeatLoop(ctx context.Context, interval int) {
 	}
 }
 
-func write[T any](ctx context.Context, b *Bot, event sendEvent[T]) {
-	wsjson.Write(ctx, b.conn, event)
+func (b *Bot) identify(ctx context.Context) error {
+	identify := sendEvent[any]{
+		Op: OpcodeIdentify,
+		Data: map[string]any{
+			"token":   b.Cfg.Token,
+			"intents": 513,
+			"properties": map[string]any{
+				"os": runtime.GOOS,
+			},
+			"presence": map[string]any{
+				"activities": []map[string]any{
+					{
+						"name": "HKIA!!!!!",
+						"type": 0,
+					},
+				},
+				"status": status,
+			},
+		}}
+
+	return write(ctx, b, identify)
+}
+
+func write[T any](ctx context.Context, b *Bot, event sendEvent[T]) error {
 	slog.Debug("send", "op", event.Op, "s", b.seq)
+	return wsjson.Write(ctx, b.conn, event)
 }

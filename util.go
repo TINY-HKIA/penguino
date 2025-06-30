@@ -9,8 +9,6 @@ import (
 )
 
 func setupLogger() {
-	w := os.Stderr
-
 	level := slog.LevelInfo
 	if os.Getenv("LOG_LEVEL") == "debug" {
 		level = slog.LevelDebug
@@ -18,7 +16,7 @@ func setupLogger() {
 
 	// Set global logger with custom options
 	slog.SetDefault(slog.New(
-		tint.NewHandler(w, &tint.Options{
+		tint.NewHandler(os.Stderr, &tint.Options{
 			Level:      level,
 			TimeFormat: time.Kitchen,
 		}),
