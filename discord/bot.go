@@ -3,6 +3,7 @@ package discord
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -100,6 +101,12 @@ func (bot *Bot) receiveLoop(ctx context.Context) error {
 		var payload receiveEvent
 		if err := wsjson.Read(ctx, bot.conn, &payload); err != nil {
 			// var closeErr websocket.CloseError
+			if errors.As(err, &websocket.CloseError{}) {
+				slog.Error("websocket closed", "code", err.(*websocket.CloseError).Code,
+					"reason", err.(*websocket.CloseError).Reason)
+				return err
+			} 
+			slog.Warn("wsjson.Read error unknown", "err", err.Error())
 			return err
 		}
 
@@ -153,6 +160,7 @@ func (bot *Bot) receiveLoop(ctx context.Context) error {
 
 		case OpcodeHeartbeatAck:
 		case OpcodeReconnect:
+			slog.Warn("reconnecting")
 			bot.conn.CloseNow()
 			c, _, err := websocket.Dial(ctx, bot.gatewayUrl+"/?v=10&encoding=json", nil)
 			if err != nil {
