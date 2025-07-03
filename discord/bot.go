@@ -97,6 +97,7 @@ func (b *Bot) Start() error {
 			if err != nil {
 				return err
 			}
+
 			ctx, cancel := context.WithCancel(b.Context)
 			sesh.Context = ctx
 
@@ -128,10 +129,11 @@ func (s *session) handleWrites() {
 
 func (b *Bot) readLoop(sesh *session, ctx context.Context, cancel context.CancelFunc) error {
 	defer sesh.Conn.CloseNow()
+	defer cancel()
+
 	for {
 		var payload receiveEvent
 		if err := wsjson.Read(ctx, sesh.Conn, &payload); err != nil {
-			cancel()
 			slog.Debug("stopping readLoop", "sessionId", b.sessionId)
 			return err
 		}
