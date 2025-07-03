@@ -20,12 +20,13 @@ import (
 type Bot struct {
 	Cfg Config
 
-	conn       *websocket.Conn //
-	handlers   map[string]HandlerFunc
-	gatewayUrl string
-	seq        int
-	isResumed  bool
-	sessionId  string
+	conn                *websocket.Conn
+	handlers            map[string]HandlerFunc
+	gatewayUrl          string
+	seq                 int
+	isResumed           bool
+	sessionId           string
+	heartbeatCancelFunc context.CancelFunc
 }
 
 func NewBot() *Bot {
@@ -44,6 +45,14 @@ func NewBotWithConfig(cfg Config) *Bot {
 
 type Config struct {
 	Token string
+}
+
+type session struct {
+	Ctx context.Context
+
+	Seq       int
+	IsResumed bool
+	SessionId string
 }
 
 var DefaultConfig = Config{
@@ -97,6 +106,7 @@ func (bot *Bot) Start() error {
 }
 
 func (bot *Bot) receiveLoop(ctx context.Context) error {
+	heartbeatCtx, cancel := context.WithCancel(ctx)
 	for {
 		var payload receiveEvent
 		if err := wsjson.Read(ctx, bot.conn, &payload); err != nil {
@@ -105,7 +115,7 @@ func (bot *Bot) receiveLoop(ctx context.Context) error {
 				slog.Error("websocket closed", "code", err.(*websocket.CloseError).Code,
 					"reason", err.(*websocket.CloseError).Reason)
 				return err
-			} 
+			}
 			slog.Warn("wsjson.Read error unknown", "err", err.Error())
 			return err
 		}
@@ -127,7 +137,7 @@ func (bot *Bot) receiveLoop(ctx context.Context) error {
 				json.Unmarshal(payload.Data, &ready)
 				bot.gatewayUrl = ready.ResumeUrl
 				bot.sessionId = ready.SessionId
-				slog.Info(penguinoStart)
+				// slog.Info(penguinoStart)
 
 			case EventInteractionCreate:
 				// slog.Debug("dispatch",
@@ -146,13 +156,13 @@ func (bot *Bot) receiveLoop(ctx context.Context) error {
 				}
 			}
 		case OpcodeHeartbeat:
-			write(ctx, bot, sendEvent[any]{Op: OpcodeHeartbeat})
+			write(ctx, bot.conn, sendEvent[any]{Op: OpcodeHeartbeat})
 		case OpcodeHello:
 			var helloEvent helloReceivePayload
 			json.Unmarshal(payload.Data, &helloEvent)
 			slog.Debug("heartbeat", "interval", helloEvent.HeartbeatInterval)
+			go heartbeatLoop(ctx, bot.conn, helloEvent.HeartbeatInterval)
 			if !bot.isResumed {
-				go bot.heartbeatLoop(ctx, helloEvent.HeartbeatInterval)
 				if err := bot.identify(ctx); err != nil {
 					return err
 				}
@@ -161,6 +171,7 @@ func (bot *Bot) receiveLoop(ctx context.Context) error {
 		case OpcodeHeartbeatAck:
 		case OpcodeReconnect:
 			slog.Warn("reconnecting")
+			heartbeatCh <- struct{}{}
 			bot.conn.CloseNow()
 			c, _, err := websocket.Dial(ctx, bot.gatewayUrl+"/?v=10&encoding=json", nil)
 			if err != nil {
@@ -168,7 +179,7 @@ func (bot *Bot) receiveLoop(ctx context.Context) error {
 			}
 			bot.isResumed = true
 			bot.conn = c
-			write(ctx, bot, sendEvent[resumeSendPayload]{Op: OpcodeResume, Data: resumeSendPayload{
+			write(ctx, bot.conn, sendEvent[resumeSendPayload]{Op: OpcodeResume, Data: resumeSendPayload{
 				SessionID: bot.sessionId,
 				Token:     bot.Cfg.Token,
 				Seq:       bot.seq,
@@ -179,14 +190,21 @@ func (bot *Bot) receiveLoop(ctx context.Context) error {
 	}
 }
 
-func (bot *Bot) heartbeatLoop(ctx context.Context, interval int) {
+func heartbeatLoop(ctx context.Context, c *websocket.Conn, interval int) {
 	// wait for (heartbeat_interval * jitter) milliseconds before starting cycle
+
 	sleepTime := float32(interval) * rand.Float32()
 	time.Sleep(time.Duration(sleepTime) * time.Millisecond)
 
 	for {
-		write(ctx, bot, sendEvent[any]{Op: 1})
-		time.Sleep(time.Duration(interval) * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			slog.Info("stopping heartbeat")
+			return
+		default:
+			write(ctx, c, sendEvent[any]{Op: 1})
+			time.Sleep(time.Duration(interval) * time.Millisecond)
+		}
 	}
 }
 
@@ -210,10 +228,10 @@ func (b *Bot) identify(ctx context.Context) error {
 			},
 		}}
 
-	return write(ctx, b, identify)
+	return write(ctx, b.conn, identify)
 }
 
-func write[T any](ctx context.Context, b *Bot, event sendEvent[T]) error {
-	slog.Debug("send", "op", event.Op, "s", b.seq)
-	return wsjson.Write(ctx, b.conn, event)
+func write[T any](ctx context.Context, c *websocket.Conn, event sendEvent[T]) error {
+	slog.Debug("send", "op", event.Op)
+	return wsjson.Write(ctx, c, event)
 }
