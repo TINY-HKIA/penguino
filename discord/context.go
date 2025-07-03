@@ -10,7 +10,6 @@ import (
 type Context interface {
 	Send(msg *Message) error
 	SendContent(msg string) error
-	// Bind(i any) error
 }
 
 type InteractionContext struct {

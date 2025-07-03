@@ -3,7 +3,6 @@ package discord
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -18,27 +17,29 @@ import (
 )
 
 type Bot struct {
-	Cfg Config
+	Cfg     Config
+	Context context.Context
 
-	conn                *websocket.Conn
-	handlers            map[string]HandlerFunc
-	gatewayUrl          string
-	seq                 int
-	isResumed           bool
-	sessionId           string
-	heartbeatCancelFunc context.CancelFunc
+	handlers   map[string]HandlerFunc
+	gatewayUrl string
+
+	seq         int
+	isReconnect bool
+	sessionId   string
 }
 
-func NewBot() *Bot {
+func NewBot(ctx context.Context) *Bot {
 	return &Bot{
 		Cfg:      DefaultConfig,
+		Context:  ctx,
 		handlers: DefaultHandlers,
 	}
 }
 
-func NewBotWithConfig(cfg Config) *Bot {
+func NewBotWithConfig(cfg Config, ctx context.Context) *Bot {
 	return &Bot{
 		Cfg:      cfg,
+		Context:  ctx,
 		handlers: DefaultHandlers,
 	}
 }
@@ -48,11 +49,30 @@ type Config struct {
 }
 
 type session struct {
-	Ctx context.Context
+	Conn    *websocket.Conn
+	Context context.Context
 
-	Seq       int
-	IsResumed bool
-	SessionId string
+	eventch chan sendEvent[any]
+}
+
+func (b *Bot) Connect() (*session, error) {
+	if !b.isReconnect {
+		if err := b.initBotGateway(); err != nil {
+			return nil, err
+		}
+	}
+
+	c, _, err := websocket.Dial(b.Context, b.gatewayUrl+"/?v=10&encoding=json", nil)
+	if err != nil {
+		return nil, err
+	}
+
+	sesh := &session{
+		Conn:    c,
+		eventch: make(chan sendEvent[any]),
+	}
+
+	return sesh, nil
 }
 
 var DefaultConfig = Config{
@@ -63,60 +83,56 @@ var DefaultHandlers = make(map[string]HandlerFunc)
 
 type HandlerFunc func(ctx Context) error
 
-func (bot *Bot) HandleCommand(name string, f HandlerFunc) {
-	bot.handlers[name] = f
+func (b *Bot) HandleCommand(name string, f HandlerFunc) {
+	b.handlers[name] = f
 }
 
-func (bot *Bot) Start() error {
-	ctx := context.Background()
-	req, _ := http.NewRequest(http.MethodGet, fmt.Sprintf("%s%s", httpApiBaseUrl, getBotGateway), nil)
-	req.Header.Set("Authorization", "Bot "+bot.Cfg.Token)
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return err
-	}
-	if resp.StatusCode != 200 {
-		return fmt.Errorf("invalid bot token")
-	}
-
-	b, err := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if err != nil {
-		return err
-	}
-	var botGateway botGatewayResp
-	if err := json.Unmarshal(b, &botGateway); err != nil {
-		return err
-	}
-	slog.Debug("bot_gateway", "url", botGateway.URL)
-	bot.gatewayUrl = botGateway.URL
-
-	c, _, err := websocket.Dial(ctx, bot.gatewayUrl+"/?v=10&encoding=json", nil)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if c != nil {
-			c.CloseNow()
-		}
-	}()
-	bot.conn = c
-	return bot.receiveLoop(ctx)
-}
-
-func (bot *Bot) receiveLoop(ctx context.Context) error {
-	heartbeatCtx, cancel := context.WithCancel(ctx)
+func (b *Bot) Start() error {
 	for {
-		var payload receiveEvent
-		if err := wsjson.Read(ctx, bot.conn, &payload); err != nil {
-			// var closeErr websocket.CloseError
-			if errors.As(err, &websocket.CloseError{}) {
-				slog.Error("websocket closed", "code", err.(*websocket.CloseError).Code,
-					"reason", err.(*websocket.CloseError).Reason)
+		select {
+		case <-b.Context.Done():
+			return b.Context.Err()
+		default:
+			sesh, err := b.Connect()
+			if err != nil {
 				return err
 			}
-			slog.Warn("wsjson.Read error unknown", "err", err.Error())
+			ctx, cancel := context.WithCancel(b.Context)
+			sesh.Context = ctx
+
+			go sesh.handleWrites()
+			slog.Warn(b.readLoop(sesh, ctx, cancel).Error())
+		}
+	}
+}
+
+func (s *session) handleWrites() {
+	for {
+		select {
+		case <-s.Context.Done():
+			slog.Info("writer closing")
+			return
+		case event, ok := <-s.eventch:
+			if !ok {
+				slog.Warn("attempted read on closed eventch")
+			}
+
+			slog.Debug("send", "op", event.Op)
+			if err := wsjson.Write(s.Context, s.Conn, event); err != nil {
+				slog.Error("write err", "err", err.Error())
+			}
+		}
+	}
+
+}
+
+func (b *Bot) readLoop(sesh *session, ctx context.Context, cancel context.CancelFunc) error {
+	defer sesh.Conn.CloseNow()
+	for {
+		var payload receiveEvent
+		if err := wsjson.Read(ctx, sesh.Conn, &payload); err != nil {
+			cancel()
+			slog.Debug("stopping readLoop", "sessionId", b.sessionId)
 			return err
 		}
 
@@ -124,7 +140,7 @@ func (bot *Bot) receiveLoop(ctx context.Context) error {
 
 		switch payload.Op {
 		case OpcodeDispatch:
-			bot.seq = *payload.SequenceNum
+			b.seq = *payload.SequenceNum
 			slog.Debug("dispatch",
 				"t", *payload.Type,
 				"s", *payload.SequenceNum)
@@ -135,9 +151,9 @@ func (bot *Bot) receiveLoop(ctx context.Context) error {
 					SessionId string `json:"session_id"`
 				}
 				json.Unmarshal(payload.Data, &ready)
-				bot.gatewayUrl = ready.ResumeUrl
-				bot.sessionId = ready.SessionId
-				// slog.Info(penguinoStart)
+				b.gatewayUrl = ready.ResumeUrl
+				b.sessionId = ready.SessionId
+				slog.Info(penguinoStart)
 
 			case EventInteractionCreate:
 				// slog.Debug("dispatch",
@@ -150,65 +166,57 @@ func (bot *Bot) receiveLoop(ctx context.Context) error {
 					return err
 				}
 
-				err := bot.handlers[d.Data.Name](InteractionContext{req: d})
+				err := b.handlers[d.Data.Name](InteractionContext{req: d})
 				if err != nil {
 					slog.Error(err.Error())
 				}
 			}
 		case OpcodeHeartbeat:
-			write(ctx, bot.conn, sendEvent[any]{Op: OpcodeHeartbeat})
+			sesh.eventch <- sendEvent[any]{Op: OpcodeHeartbeat}
 		case OpcodeHello:
 			var helloEvent helloReceivePayload
 			json.Unmarshal(payload.Data, &helloEvent)
 			slog.Debug("heartbeat", "interval", helloEvent.HeartbeatInterval)
-			go heartbeatLoop(ctx, bot.conn, helloEvent.HeartbeatInterval)
-			if !bot.isResumed {
-				if err := bot.identify(ctx); err != nil {
-					return err
-				}
+			go sesh.heartbeatLoop(ctx, helloEvent.HeartbeatInterval)
+			if b.isReconnect {
+				sesh.eventch <- sendEvent[any]{Op: OpcodeResume, Data: resumeSendPayload{
+					SessionID: b.sessionId,
+					Token:     b.Cfg.Token,
+					Seq:       b.seq,
+				}}
+
+			} else {
+				b.identify(sesh)
 			}
 
 		case OpcodeHeartbeatAck:
 		case OpcodeReconnect:
 			slog.Warn("reconnecting")
-			heartbeatCh <- struct{}{}
-			bot.conn.CloseNow()
-			c, _, err := websocket.Dial(ctx, bot.gatewayUrl+"/?v=10&encoding=json", nil)
-			if err != nil {
-				return err
-			}
-			bot.isResumed = true
-			bot.conn = c
-			write(ctx, bot.conn, sendEvent[resumeSendPayload]{Op: OpcodeResume, Data: resumeSendPayload{
-				SessionID: bot.sessionId,
-				Token:     bot.Cfg.Token,
-				Seq:       bot.seq,
-			}})
+			cancel()
+			b.isReconnect = true
 		default:
 			slog.Warn("unknown opcode", "op", payload.Op, "data", string(payload.Data))
 		}
 	}
 }
 
-func heartbeatLoop(ctx context.Context, c *websocket.Conn, interval int) {
+func (sesh *session) heartbeatLoop(ctx context.Context, interval int) {
 	// wait for (heartbeat_interval * jitter) milliseconds before starting cycle
-
 	sleepTime := float32(interval) * rand.Float32()
 	time.Sleep(time.Duration(sleepTime) * time.Millisecond)
 
 	for {
 		select {
 		case <-ctx.Done():
-			slog.Info("stopping heartbeat")
 			return
 		default:
-			write(ctx, c, sendEvent[any]{Op: 1})
+			sesh.eventch <- sendEvent[any]{Op: 1}
 			time.Sleep(time.Duration(interval) * time.Millisecond)
 		}
 	}
 }
 
-func (b *Bot) identify(ctx context.Context) error {
+func (b *Bot) identify(sesh *session) {
 	identify := sendEvent[any]{
 		Op: OpcodeIdentify,
 		Data: map[string]any{
@@ -228,10 +236,30 @@ func (b *Bot) identify(ctx context.Context) error {
 			},
 		}}
 
-	return write(ctx, b.conn, identify)
+	sesh.eventch <- identify
 }
 
-func write[T any](ctx context.Context, c *websocket.Conn, event sendEvent[T]) error {
-	slog.Debug("send", "op", event.Op)
-	return wsjson.Write(ctx, c, event)
+func (b *Bot) initBotGateway() error {
+	req, _ := http.NewRequest(http.MethodGet, fmt.Sprintf("%s%s", httpApiBaseUrl, getBotGateway), nil)
+	req.Header.Set("Authorization", "Bot "+b.Cfg.Token)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("invalid bot token")
+	}
+	bytes, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		return err
+	}
+	var botGateway botGatewayResp
+	if err := json.Unmarshal(bytes, &botGateway); err != nil {
+		return err
+	}
+	slog.Debug("bot_gateway", "url", botGateway.URL)
+	b.gatewayUrl = botGateway.URL
+	return nil
 }

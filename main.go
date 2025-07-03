@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log/slog"
 
 	_ "github.com/joho/godotenv/autoload"
@@ -8,8 +9,10 @@ import (
 )
 
 func main() {
-	setupLogger()
-	b := discord.NewBot()
+	setupLogger() // todo: add bot Logger
+
+	b := discord.NewBot(context.Background())
+
 	b.HandleCommand("ping", PingHandler)
 	b.HandleCommand("characters", CharactersHandler)
 	slog.Error(b.Start().Error())
